@@ -47,9 +47,27 @@ class FrontierDetector(Node):
         Finds cells that are free and adjacent to unknown cells.
         """
         if self.map_data is None:
+            self.get_logger().warn('No map data yet!')
             return
         
         h, w = self.map_data.shape
+        
+        # DEBUG: What values exist in the map?
+        unique_values = np.unique(self.map_data)
+        self.get_logger().info(f'Map shape: {h}x{w}, Unique values in map: {unique_values}')
+        
+        # Count each type
+        free_cells = np.sum(self.map_data == 0)
+        unknown_cells = np.sum(self.map_data == -1)
+        occupied_cells = np.sum(self.map_data == 100)
+        
+        self.get_logger().info(f'Free: {free_cells}, Unknown: {unknown_cells}, Occupied: {occupied_cells}')
+        
+        # If no unknown cells, we can't find frontiers!
+        if unknown_cells == 0:
+            self.get_logger().warn('NO UNKNOWN CELLS IN MAP - Cannot detect frontiers!')
+            return
+        
         frontier_cells = []
         
         # Scan grid for frontier cells
