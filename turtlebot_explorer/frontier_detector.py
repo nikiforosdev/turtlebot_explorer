@@ -19,9 +19,16 @@ class FrontierDetector(Node):
     
     def __init__(self):
         super().__init__('frontier_detector')
+    
+        # Subscribe to map with proper QoS
+        qos = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+            durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
         
-        # Subscribe to map
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        self.create_subscription(OccupancyGrid, '/map', self.map_callback, qos)
         
         # Publish frontier points
         self.frontier_pub = self.create_publisher(PointStamped, '/frontiers', 10)

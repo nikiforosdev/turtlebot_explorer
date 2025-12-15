@@ -31,13 +31,21 @@ class ExplorerController(Node):
         
         # Publishers - CHANGED TO TwistStamped
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
-        
-        # Subscribers
         self.create_subscription(Bool, '/obstacle_detected', self.obstacle_callback, 10)
         self.create_subscription(TwistStamped, '/reactive_cmd', self.reactive_cmd_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        
+        # Map subscription with proper QoS
+        map_qos = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+            durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
+            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
+        
         self.create_subscription(PointStamped, '/frontiers', self.frontier_callback, 10)
+
         
         # State variables
         self.obstacle_detected = False

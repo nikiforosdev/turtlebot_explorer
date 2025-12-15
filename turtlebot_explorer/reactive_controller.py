@@ -41,7 +41,7 @@ class ReactiveController(Node):
         self.laser_ranges = None
         
         # Parameters
-        self.obstacle_threshold = 0.5  # meters
+        self.obstacle_threshold = 0.8  # meters
         
         # Timer for reactive control
         self.create_timer(0.1, self.reactive_control_loop)  # 10 Hz
@@ -73,6 +73,10 @@ class ReactiveController(Node):
         front_ranges = np.concatenate([front_left, front_right])
         
         min_distance = np.min(front_ranges)
+        
+        # DEBUG
+        if min_distance < self.obstacle_threshold:
+            self.get_logger().info(f'OBSTACLE! Min distance: {min_distance:.2f}m')
         
         return min_distance < self.obstacle_threshold
     
