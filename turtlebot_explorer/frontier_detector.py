@@ -60,52 +60,47 @@ class FrontierDetector(Node):
         h, w = self.map_data.shape
         frontier_cells = []
         
-        # Scan grid for frontier cells
-        for i in range(5, h-5, 5):  # Sample every 5th cell for performance
-            for j in range(5, w-5, 5):
-                # FIXED: Check if current cell is free (low values = free space)
-                # In your map: 0-20 seems to be free space
-                if self.map_data[i, j] < 20:  # Free space threshold
-                    # Check 4-connected neighbors for unknown cells
+        # DEBUG: Check map statistics
+        unique_vals = np.unique(self.map_data)
+        self.get_logger().info(f'Map: {h}x{w}, values range: {unique_vals[0]} to {unique_vals[-1]}', 
+                            throttle_duration_sec=5.0)
+        
+        # Scan grid for frontier cells with finer sampling
+        for i in range(2, h-2, 3):  # Every 3rd cell (was 5)
+            for j in range(2, w-2, 3):
+                current = self.map_data[i, j]
+                
+                # Cell must be definitely free (very low values in 0-99 scale)
+                if current >= 0 and current < 10:  # Free space
+                    
+                    # Check 8-connected neighbors (not just 4)
                     neighbors = [
                         self.map_data[i-1, j],
                         self.map_data[i+1, j],
                         self.map_data[i, j-1],
-                        self.map_data[i, j+1]
+                        self.map_data[i, j+1],
+                        self.map_data[i-1, j-1],
+                        self.map_data[i-1, j+1],
+                        self.map_data[i+1, j-1],
+                        self.map_data[i+1, j+1]
                     ]
                     
-                    # FIXED: High values (80-99) are likely unknown or occupied
-                    # Check if any neighbor has high uncertainty/unknown value
-                    if any(n > 80 for n in neighbors):
+                    # Frontier if any neighbor is unknown/unexplored (mid-to-high values)
+                    # In 0-99 scale: unknown typically 40-60, occupied is 70-99
+                    has_unknown = any(50 <= n <= 70 for n in neighbors)
+                    
+                    if has_unknown:
                         # Convert to world coordinates
                         wx = self.map_info.origin.position.x + j * self.map_info.resolution
                         wy = self.map_info.origin.position.y + i * self.map_info.resolution
                         frontier_cells.append((wx, wy))
         
         self.frontiers = frontier_cells
-        self.get_logger().info(f'Detected {len(frontier_cells)} frontier points')
         
-        # Scan grid for frontier cells
-        for i in range(5, h-5, 5):  # Sample every 5th cell for performance
-            for j in range(5, w-5, 5):
-                # Check if current cell is free
-                if self.map_data[i, j] == 0:
-                    # Check 4-connected neighbors for unknown cells
-                    neighbors = [
-                        self.map_data[i-1, j],
-                        self.map_data[i+1, j],
-                        self.map_data[i, j-1],
-                        self.map_data[i, j+1]
-                    ]
-                    
-                    # If any neighbor is unknown, this is a frontier
-                    if -1 in neighbors:
-                        # Convert to world coordinates
-                        wx = self.map_info.origin.position.x + j * self.map_info.resolution
-                        wy = self.map_info.origin.position.y + i * self.map_info.resolution
-                        frontier_cells.append((wx, wy))
-        
-        self.frontiers = frontier_cells
+        if len(frontier_cells) > 0:
+            self.get_logger().info(f'✓ Found {len(frontier_cells)} frontiers!')
+        else:
+            self.get_logger().info('✗ No frontiers detected', throttle_duration_sec=3.0)
         
         # Publish all frontiers
         for wx, wy in self.frontiers:
@@ -116,12 +111,6 @@ class FrontierDetector(Node):
             point_msg.point.y = wy
             point_msg.point.z = 0.0
             self.frontier_pub.publish(point_msg)
-        
-        if len(self.frontiers) > 0:
-            self.get_logger().info(f'Detected {len(self.frontiers)} frontier points', 
-                                 throttle_duration_sec=2.0)
-        else:
-            self.get_logger().info('No frontiers detected', throttle_duration_sec=5.0)
 
 
 def main(args=None):
