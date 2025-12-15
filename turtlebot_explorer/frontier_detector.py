@@ -51,24 +51,32 @@ class FrontierDetector(Node):
             return
         
         h, w = self.map_data.shape
-        
-        # DEBUG: What values exist in the map?
-        unique_values = np.unique(self.map_data)
-        self.get_logger().info(f'Map shape: {h}x{w}, Unique values in map: {unique_values}')
-        
-        # Count each type
-        free_cells = np.sum(self.map_data == 0)
-        unknown_cells = np.sum(self.map_data == -1)
-        occupied_cells = np.sum(self.map_data == 100)
-        
-        self.get_logger().info(f'Free: {free_cells}, Unknown: {unknown_cells}, Occupied: {occupied_cells}')
-        
-        # If no unknown cells, we can't find frontiers!
-        if unknown_cells == 0:
-            self.get_logger().warn('NO UNKNOWN CELLS IN MAP - Cannot detect frontiers!')
-            return
-        
         frontier_cells = []
+        
+        # Scan grid for frontier cells
+        for i in range(5, h-5, 5):  # Sample every 5th cell for performance
+            for j in range(5, w-5, 5):
+                # FIXED: Check if current cell is free (low values = free space)
+                # In your map: 0-20 seems to be free space
+                if self.map_data[i, j] < 20:  # Free space threshold
+                    # Check 4-connected neighbors for unknown cells
+                    neighbors = [
+                        self.map_data[i-1, j],
+                        self.map_data[i+1, j],
+                        self.map_data[i, j-1],
+                        self.map_data[i, j+1]
+                    ]
+                    
+                    # FIXED: High values (80-99) are likely unknown or occupied
+                    # Check if any neighbor has high uncertainty/unknown value
+                    if any(n > 80 for n in neighbors):
+                        # Convert to world coordinates
+                        wx = self.map_info.origin.position.x + j * self.map_info.resolution
+                        wy = self.map_info.origin.position.y + i * self.map_info.resolution
+                        frontier_cells.append((wx, wy))
+        
+        self.frontiers = frontier_cells
+        self.get_logger().info(f'Detected {len(frontier_cells)} frontier points')
         
         # Scan grid for frontier cells
         for i in range(5, h-5, 5):  # Sample every 5th cell for performance
