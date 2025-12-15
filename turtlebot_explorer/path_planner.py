@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Path Planner Node
-Subscribes to: /map, /odom
-Provides: A* path planning functionality
-"""
-
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
@@ -23,9 +16,6 @@ class PathPlanner(Node):
     def __init__(self):
         super().__init__('path_planner')
         
-        # Subscriptions are DISABLED because this instance is not spun as a standalone node.
-        # Data will be passed directly from ExplorerController.
-        
         # Publish path for visualization (optional)
         self.path_pub = self.create_publisher(Path, '/planned_path', 10)
         
@@ -33,13 +23,13 @@ class PathPlanner(Node):
         self.map_info = None
         self.current_x = 0.0
         self.current_y = 0.0
-        self.cost_map = None # Initialized here to be created later by inflate_obstacles
+        self.cost_map = None
         
-        # A* parameters
-        self.obstacle_cost_threshold = 50  # Cells with value > 50 are obstacles
-        self.inflation_radius = 2  # Grid cells to inflate obstacles (safety margin)
+        # A* parameters - FIXED VALUES
+        self.obstacle_cost_threshold = 20  # Lower threshold - treat cells > 20 as obstacles
+        self.inflation_radius = 3  # Increased from 2 to 3 for more safety margin
         
-        self.get_logger().info('Path Planner Node started with A* algorithm (Data received externally)')
+        self.get_logger().info('Path Planner Node started with A* algorithm (FIXED VERSION)')
     
     def update_data(self, map_data, map_info, current_x, current_y):
         """Update map and pose data from the calling node."""
@@ -52,18 +42,23 @@ class PathPlanner(Node):
         if self.map_data is not None:
             self.cost_map = self.inflate_obstacles(self.map_data)
     
-    # map_callback and odom_callback methods are no longer needed
-    
     def inflate_obstacles(self, grid):
         """
-        Inflate obstacles for safety margin.
+        Inflate obstacles for safety margin - IMPROVED VERSION
         Returns a cost map where high values = obstacles or near obstacles.
         """
         h, w = grid.shape
-        cost_map = np.copy(grid)
+        cost_map = np.copy(grid).astype(np.float32)
         
-        # Find obstacle cells
-        obstacle_cells = np.argwhere(grid > self.obstacle_cost_threshold)
+        # Treat unknown cells (-1) as obstacles for path planning
+        cost_map[cost_map == -1] = 100
+        
+        # Find obstacle cells (including unknown)
+        obstacle_cells = np.argwhere(grid >= self.obstacle_cost_threshold)
+        
+        # Also add unknown cells as obstacles
+        unknown_cells = np.argwhere(grid == -1)
+        obstacle_cells = np.vstack([obstacle_cells, unknown_cells]) if len(unknown_cells) > 0 else obstacle_cells
         
         # Inflate each obstacle
         for obs_i, obs_j in obstacle_cells:
@@ -74,8 +69,10 @@ class PathPlanner(Node):
                         # Distance-based cost
                         dist = math.sqrt(di*di + dj*dj)
                         if dist <= self.inflation_radius:
-                            # Increase cost near obstacles
-                            cost_map[ni, nj] = max(cost_map[ni, nj], 60)
+                            # Progressive cost increase near obstacles
+                            # Closer to obstacle = higher cost
+                            inflation_cost = 100 * (1.0 - dist / self.inflation_radius)
+                            cost_map[ni, nj] = max(cost_map[ni, nj], inflation_cost)
         
         return cost_map
     
@@ -100,7 +97,7 @@ class PathPlanner(Node):
         return x, y
     
     def is_valid_cell(self, grid_x, grid_y):
-        """Check if grid cell is valid and not an obstacle."""
+        """Check if grid cell is valid and not an obstacle - IMPROVED VERSION"""
         if self.cost_map is None:
             return False
         
@@ -110,12 +107,12 @@ class PathPlanner(Node):
         if grid_x < 0 or grid_x >= w or grid_y < 0 or grid_y >= h:
             return False
         
-        # Check if not obstacle (allow some cost for inflated areas)
-        # Note: We must check for unknown/free (-1, 0) AND inflated cost (< obstacle_cost_threshold)
+        # Check cost - must be low enough to traverse
+        # Using lower threshold for stricter obstacle avoidance
         map_val = self.cost_map[grid_y, grid_x]
         
-        # If it's unknown (-1) or too costly (>= 50), it's invalid for path planning
-        return map_val != -1 and map_val < self.obstacle_cost_threshold
+        # Valid if cost is below threshold (free or low-cost inflated area)
+        return map_val < self.obstacle_cost_threshold
     
     def heuristic(self, a, b):
         """Euclidean distance heuristic for A*."""
@@ -136,13 +133,13 @@ class PathPlanner(Node):
                 
                 if self.is_valid_cell(nx, ny):
                     # Cost is higher for diagonal moves
-                    cost = 1.414 if (dx != 0 and dy != 0) else 1.0
+                    base_cost = 1.414 if (dx != 0 and dy != 0) else 1.0
                     
-                    # Add cost from cost_map to traverse through this cell
-                    # Normalize map cost (0-100) to a path penalty (e.g., 0-5)
-                    map_cost = self.cost_map[ny, nx] / 20.0 
+                    # Add cost from cost_map - penalize high-cost areas more
+                    map_cost = self.cost_map[ny, nx] / 10.0  # Scale cost appropriately
                     
-                    neighbors.append(((nx, ny), cost + map_cost))
+                    total_cost = base_cost + map_cost
+                    neighbors.append(((nx, ny), total_cost))
         
         return neighbors
     
@@ -164,16 +161,15 @@ class PathPlanner(Node):
     
     def smooth_path(self, path):
         """
-        Simplify path by removing unnecessary waypoints.
-        Keep only waypoints where direction changes significantly.
+        Simplify path by removing unnecessary waypoints - IMPROVED VERSION
         """
         if len(path) < 3:
             return path
         
         smoothed = [path[0]]
         
-        # Use a distance-based sampling to reduce the path complexity
-        MIN_DIST_SQUARED = 2**2 # Keep waypoints at least 2 cells apart
+        # Increased minimum distance for better path following
+        MIN_DIST_SQUARED = 4**2  # Keep waypoints at least 4 cells apart (was 2)
         
         for i in range(1, len(path) - 1):
             curr = path[i]
@@ -181,10 +177,9 @@ class PathPlanner(Node):
             
             dist_sq = (curr[0] - last_smoothed[0])**2 + (curr[1] - last_smoothed[1])**2
             
-            # Simple version: Only keep points that are significantly far away
             if dist_sq >= MIN_DIST_SQUARED:
                 smoothed.append(curr)
-                
+        
         # Always add the final goal
         if path[-1] != smoothed[-1]:
             smoothed.append(path[-1])
@@ -217,12 +212,17 @@ class PathPlanner(Node):
         
         # Check if start and goal are valid
         if not self.is_valid_cell(start_gx, start_gy):
-            self.get_logger().warn(f'Start position ({start_gx}, {start_gy}) is in obstacle! Map value: {self.cost_map[start_gy, start_gx]}')
+            self.get_logger().warn(f'Start position ({start_gx}, {start_gy}) is in obstacle! Cost: {self.cost_map[start_gy, start_gx]:.1f}')
             return None
         
         if not self.is_valid_cell(goal_gx, goal_gy):
-            self.get_logger().warn(f'Goal position ({goal_gx}, {goal_gy}) is in obstacle! Map value: {self.cost_map[goal_gy, goal_gx]}')
-            return None
+            self.get_logger().warn(f'Goal position ({goal_gx}, {goal_gy}) is in obstacle! Cost: {self.cost_map[goal_gy, goal_gx]:.1f}')
+            # Try to find nearest valid cell near goal
+            goal_gx, goal_gy = self.find_nearest_valid_cell(goal_gx, goal_gy)
+            if goal_gx is None:
+                self.get_logger().warn('Could not find valid goal nearby')
+                return None
+            self.get_logger().info(f'Adjusted goal to nearest valid cell: ({goal_gx}, {goal_gy})')
         
         # A* algorithm
         start = (start_gx, start_gy)
@@ -238,7 +238,11 @@ class PathPlanner(Node):
         
         closed_set = set()
         
-        while open_set:
+        max_iterations = 10000  # Prevent infinite loops
+        iterations = 0
+        
+        while open_set and iterations < max_iterations:
+            iterations += 1
             current_f, _, current = heapq.heappop(open_set)
             
             if current in closed_set:
@@ -260,7 +264,7 @@ class PathPlanner(Node):
                     wx, wy = self.grid_to_world(gx, gy)
                     world_path.append((wx, wy))
                 
-                self.get_logger().info(f'Path found with {len(world_path)} waypoints')
+                self.get_logger().info(f'Path found with {len(world_path)} waypoints after {iterations} iterations')
                 
                 # Publish path for visualization
                 self.publish_path(world_path)
@@ -284,8 +288,25 @@ class PathPlanner(Node):
                     counter += 1
                     heapq.heappush(open_set, (f_score[neighbor], counter, neighbor))
         
-        self.get_logger().warn('No path found to goal!')
+        self.get_logger().warn(f'No path found to goal after {iterations} iterations!')
         return None
+    
+    def find_nearest_valid_cell(self, goal_gx, goal_gy, search_radius=5):
+        """Find the nearest valid cell to an invalid goal position."""
+        best_cell = None
+        min_dist = float('inf')
+        
+        for dx in range(-search_radius, search_radius + 1):
+            for dy in range(-search_radius, search_radius + 1):
+                nx, ny = goal_gx + dx, goal_gy + dy
+                
+                if self.is_valid_cell(nx, ny):
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_cell = (nx, ny)
+        
+        return best_cell if best_cell else (None, None)
     
     def publish_path(self, waypoints):
         """Publish path for visualization in RViz."""
@@ -312,8 +333,6 @@ def main(args=None):
     node = PathPlanner()
     
     try:
-        # Note: This file should be launched as a library, but if run standalone, 
-        # it will just sit and wait for data.
         rclpy.spin(node) 
     except KeyboardInterrupt:
         pass

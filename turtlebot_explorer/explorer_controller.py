@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Explorer Controller Node (Main Coordinator)
-Subscribes to: /obstacle_detected, /reactive_cmd, /odom, /map, /frontiers
-Publishes to: /cmd_vel (TwistStamped)
-
-Coordinates between reactive and deliberative behaviors.
-Implements the HYBRID ARCHITECTURE.
+Explorer Controller Node (Main Coordinator) - IMPROVED VERSION
+Key improvements:
+1. Better frontier validation (check if frontier is reachable)
+2. Slower, more careful navigation
+3. Better obstacle handling during path following
 """
 
 import rclpy
@@ -62,7 +61,7 @@ class ExplorerController(Node):
         self.path_planner = PathPlanner()
         
         # Path following
-        self.current_path = []  # List of waypoints
+        self.current_path = []
         self.current_waypoint_index = 0
         self.waypoint_threshold = 0.3  # meters
         
@@ -80,18 +79,18 @@ class ExplorerController(Node):
         
         # Goal parameters
         self.goal_threshold = 0.3
-        self.goal_timeout = 20.0  # Increased for path following
+        self.goal_timeout = 30.0  # Increased timeout
         self.goal_start_time = None
-        self.min_goal_distance = 1.0
+        self.min_goal_distance = 1.0  # Minimum distance to goal
         
-        # Parameters
-        self.max_linear = 0.22
-        self.max_angular = 2.84
+        # Parameters - REDUCED SPEEDS FOR SAFETY
+        self.max_linear = 0.15  # Reduced from 0.22
+        self.max_angular = 2.0  # Reduced from 2.84
         
         # Control loop
         self.create_timer(0.1, self.control_loop)
         
-        self.get_logger().info('Explorer Controller with A* path planning started')
+        self.get_logger().info('Explorer Controller with IMPROVED path planning started')
     
     def obstacle_callback(self, msg):
         """Update obstacle detection status."""
@@ -121,7 +120,6 @@ class ExplorerController(Node):
     def frontier_callback(self, msg):
         """
         Receive frontier points from frontier_detector node.
-        We accumulate them and reset the list periodically.
         """
         current_time = self.get_clock().now()
         
@@ -134,9 +132,42 @@ class ExplorerController(Node):
         self.frontiers.append((msg.point.x, msg.point.y))
         self.last_frontier_time = current_time
     
+    def is_frontier_safe(self, fx, fy):
+        """
+        Check if a frontier point is safe to navigate to.
+        Returns True if the frontier is in free space with some margin from obstacles.
+        """
+        if self.map_data is None or self.map_info is None:
+            return False
+        
+        # Convert to grid coordinates
+        grid_x = int((fx - self.map_info.origin.position.x) / self.map_info.resolution)
+        grid_y = int((fy - self.map_info.origin.position.y) / self.map_info.resolution)
+        
+        h, w = self.map_data.shape
+        
+        # Check if within bounds
+        if grid_x < 0 or grid_x >= w or grid_y < 0 or grid_y >= h:
+            return False
+        
+        # Check the frontier cell and surrounding cells
+        safety_radius = 2  # Check 2 cells around the frontier
+        
+        for di in range(-safety_radius, safety_radius + 1):
+            for dj in range(-safety_radius, safety_radius + 1):
+                ni, nj = grid_y + di, grid_x + dj
+                
+                if 0 <= ni < h and 0 <= nj < w:
+                    cell_value = self.map_data[ni, nj]
+                    # If any nearby cell is an obstacle (> 20) or unknown (-1), reject
+                    if cell_value > 20 or cell_value == -1:
+                        return False
+        
+        return True
+    
     def select_goal(self):
         """
-        Select next exploration goal from received frontiers.
+        Select next exploration goal from received frontiers - IMPROVED VERSION
         Returns (x, y) or None.
         """
         # Check if we have recent frontiers
@@ -151,30 +182,35 @@ class ExplorerController(Node):
                 self.get_logger().warn('Frontier data is stale')
                 return None
         
-        # Select nearest frontier
-        min_dist = float('inf')
-        best = None
-        
+        # Filter safe frontiers
+        safe_frontiers = []
         for fx, fy in self.frontiers:
             dist = math.sqrt((fx - self.x)**2 + (fy - self.y)**2)
-            if dist < min_dist and dist > 0.5:  # At least 0.5m away
-                min_dist = dist
-                best = (fx, fy)
+            
+            # Check distance and safety
+            if dist > 1.0 and dist < 5.0 and self.is_frontier_safe(fx, fy):
+                safe_frontiers.append((fx, fy, dist))
         
-        return best
+        if not safe_frontiers:
+            self.get_logger().warn('No safe frontiers found!')
+            return None
+        
+        # Select nearest safe frontier
+        safe_frontiers.sort(key=lambda x: x[2])  # Sort by distance
+        best = safe_frontiers[0]
+        
+        self.get_logger().info(f'Selected safe frontier at distance {best[2]:.2f}m')
+        return (best[0], best[1])
     
     def compute_startup_command(self):
         """
         Generate exploratory movement when no frontiers exist yet.
-        This helps build initial map at startup.
         """
         cmd = self.create_twist_stamped()
         
-        # Initialize startup timer
         if self.startup_start_time is None:
             self.startup_start_time = self.get_clock().now()
         
-        # Move forward slowly for initial exploration
         elapsed = (self.get_clock().now() - self.startup_start_time).nanoseconds / 1e9
         
         if elapsed < self.startup_move_duration:
@@ -182,61 +218,19 @@ class ExplorerController(Node):
             cmd.twist.angular.z = 0.0
             return cmd
         else:
-            # After initial movement, disable startup mode
             self.startup_mode = False
             self.startup_start_time = None
-            return self.create_twist_stamped()  # Stop
+            return self.create_twist_stamped()
     
     def compute_random_exploration_command(self):
         """
-        When stuck with no frontiers for a while, try random exploration.
-        This helps escape local minima or find new areas.
+        When stuck with no frontiers, try random exploration.
         """
         cmd = self.create_twist_stamped()
         
-        # Random walk: move forward and turn slightly
         import random
-        cmd.twist.linear.x = 0.15
+        cmd.twist.linear.x = 0.1  # Slower for safety
         cmd.twist.angular.z = random.uniform(-0.5, 0.5)
-        
-        return cmd
-    
-    def compute_navigation_command(self):
-        """
-        Compute command to navigate to current goal.
-        DELIBERATIVE behavior.
-        
-        Returns:
-            TwistStamped command or None if goal reached
-        """
-        if self.goal is None:
-            return self.create_twist_stamped()
-        
-        # Calculate distance and angle to goal
-        dx = self.goal[0] - self.x
-        dy = self.goal[1] - self.y
-        dist = math.sqrt(dx**2 + dy**2)
-        
-        # Check if reached
-        if dist < self.goal_threshold:
-            return None  # Signal goal reached
-        
-        # Calculate angle error
-        desired_yaw = math.atan2(dy, dx)
-        angle_error = desired_yaw - self.yaw
-        
-        # Normalize to [-pi, pi]
-        angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
-        
-        # Proportional control
-        cmd = self.create_twist_stamped()
-        
-        if abs(angle_error) > 0.2:  # Need to turn
-            cmd.twist.linear.x = 0.05
-            cmd.twist.angular.z = np.clip(2.0 * angle_error, -self.max_angular, self.max_angular)
-        else:  # Move forward
-            cmd.twist.linear.x = np.clip(0.5 * dist, 0.0, self.max_linear)
-            cmd.twist.angular.z = np.clip(1.0 * angle_error, -0.5, 0.5)
         
         return cmd
     
@@ -249,8 +243,7 @@ class ExplorerController(Node):
     
     def compute_waypoint_navigation_command(self):
         """
-        Navigate along the planned path by following waypoints.
-        Returns TwistStamped command or None if waypoint reached.
+        Navigate along the planned path - IMPROVED VERSION with slower speeds
         """
         if not self.current_path or self.current_waypoint_index >= len(self.current_path):
             return None
@@ -268,11 +261,9 @@ class ExplorerController(Node):
             self.current_waypoint_index += 1
             self.get_logger().info(f'Waypoint {self.current_waypoint_index}/{len(self.current_path)} reached')
             
-            # Check if this was the last waypoint
             if self.current_waypoint_index >= len(self.current_path):
-                return None  # Path complete
+                return None
             
-            # Move to next waypoint
             return self.compute_waypoint_navigation_command()
         
         # Navigate to current waypoint
@@ -282,25 +273,32 @@ class ExplorerController(Node):
         
         cmd = self.create_twist_stamped()
         
-        if abs(angle_error) > 0.2:
-            # Turn toward waypoint
-            cmd.twist.linear.x = 0.05
-            cmd.twist.angular.z = np.clip(2.0 * angle_error, -self.max_angular, self.max_angular)
+        # IMPROVED: More conservative turning and speed control
+        if abs(angle_error) > 0.3:  # Increased threshold for turning
+            # Turn in place
+            cmd.twist.linear.x = 0.0  # Stop while turning
+            cmd.twist.angular.z = np.clip(1.5 * angle_error, -self.max_angular, self.max_angular)
         else:
-            # Move forward
-            cmd.twist.linear.x = np.clip(0.5 * dist, 0.0, self.max_linear)
-            cmd.twist.angular.z = np.clip(1.0 * angle_error, -0.5, 0.5)
+            # Move forward with reduced speed
+            speed = min(0.3 * dist, self.max_linear)
+            cmd.twist.linear.x = speed
+            cmd.twist.angular.z = np.clip(1.0 * angle_error, -0.3, 0.3)
         
         return cmd
 
     def control_loop(self):
         """
-        MAIN HYBRID CONTROL LOOP with A* path following
+        MAIN HYBRID CONTROL LOOP
         """
-        # REACTIVE LAYER
+        # REACTIVE LAYER - Always has priority
         if self.obstacle_detected and self.reactive_cmd is not None:
             self.cmd_pub.publish(self.reactive_cmd)
-            self.get_logger().info('REACTIVE MODE', throttle_duration_sec=1.0)
+            self.get_logger().info('REACTIVE MODE: Avoiding obstacle', throttle_duration_sec=1.0)
+            
+            # If obstacle detected while following path, consider replanning
+            if self.current_path:
+                self.get_logger().warn('Obstacle detected during path following!')
+            
             return
         
         # STARTUP MODE
@@ -328,7 +326,7 @@ class ExplorerController(Node):
             
             if cmd is None:
                 # Path complete
-                self.get_logger().info('Path complete! Goal reached.')
+                self.get_logger().info('✓ Path complete! Goal reached.')
                 self.current_path = []
                 self.current_waypoint_index = 0
                 self.goal = None
@@ -342,10 +340,10 @@ class ExplorerController(Node):
         if self.goal is None:
             self.goal = self.select_goal()
             
-            if self.goal and self.map_data is not None: # Check for map data
+            if self.goal and self.map_data is not None:
                 self.get_logger().info(f'New goal selected: ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
                 
-                # --- CRITICAL FIX: Pass data to the Path Planner instance ---
+                # Update path planner data
                 self.path_planner.update_data(
                     self.map_data, 
                     self.map_info, 
@@ -361,9 +359,9 @@ class ExplorerController(Node):
                     self.current_waypoint_index = 0
                     self.goal_start_time = self.get_clock().now()
                     self.no_frontier_counter = 0
-                    self.get_logger().info(f'Path planned with {len(path)} waypoints')
+                    self.get_logger().info(f'✓ Path planned with {len(path)} waypoints')
                 else:
-                    self.get_logger().warn('Path planning failed! Trying different goal.')
+                    self.get_logger().warn('✗ Path planning failed! Trying different goal.')
                     self.goal = None
             else:
                 # No frontiers
