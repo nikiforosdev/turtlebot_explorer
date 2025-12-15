@@ -51,7 +51,9 @@ class FrontierDetector(Node):
     def detect_frontiers(self):
         """
         Main frontier detection algorithm.
-        Finds cells that are free and adjacent to unknown cells.
+        Finds cells that are free (0) and adjacent to unknown cells (-1).
+        
+        
         """
         if self.map_data is None:
             self.get_logger().warn('No map data yet!')
@@ -60,20 +62,16 @@ class FrontierDetector(Node):
         h, w = self.map_data.shape
         frontier_cells = []
         
-        # DEBUG: Check map statistics
-        unique_vals = np.unique(self.map_data)
-        self.get_logger().info(f'Map: {h}x{w}, values range: {unique_vals[0]} to {unique_vals[-1]}', 
-                            throttle_duration_sec=5.0)
-        
-        # Scan grid for frontier cells with finer sampling
-        for i in range(2, h-2, 3):  # Every 3rd cell (was 5)
-            for j in range(2, w-2, 3):
+        # Scan grid for frontier cells - Check all cells
+        # Start at 1 and end at h/w-1 to safely check 8 neighbors
+        for i in range(1, h - 1):
+            for j in range(1, w - 1):
                 current = self.map_data[i, j]
                 
-                # Cell must be definitely free (very low values in 0-99 scale)
-                if current >= 0 and current < 10:  # Free space
+                # Cell must be Free space (Standard ROS: 0)
+                if current == 0:  
                     
-                    # Check 8-connected neighbors (not just 4)
+                    # Check 8-connected neighbors
                     neighbors = [
                         self.map_data[i-1, j],
                         self.map_data[i+1, j],
@@ -85,14 +83,13 @@ class FrontierDetector(Node):
                         self.map_data[i+1, j+1]
                     ]
                     
-                    # Frontier if any neighbor is unknown/unexplored (mid-to-high values)
-                    # In 0-99 scale: unknown typically 40-60, occupied is 70-99
-                    has_unknown = any(50 <= n <= 70 for n in neighbors)
+                    # Frontier if any neighbor is Unknown (Standard ROS: -1)
+                    has_unknown = any(n == -1 for n in neighbors)
                     
                     if has_unknown:
-                        # Convert to world coordinates
-                        wx = self.map_info.origin.position.x + j * self.map_info.resolution
-                        wy = self.map_info.origin.position.y + i * self.map_info.resolution
+                        # Convert to world coordinates (using center of cell: +0.5 * resolution)
+                        wx = self.map_info.origin.position.x + (j + 0.5) * self.map_info.resolution
+                        wy = self.map_info.origin.position.y + (i + 0.5) * self.map_info.resolution
                         frontier_cells.append((wx, wy))
         
         self.frontiers = frontier_cells

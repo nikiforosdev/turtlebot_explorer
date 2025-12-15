@@ -23,15 +23,8 @@ class PathPlanner(Node):
     def __init__(self):
         super().__init__('path_planner')
         
-        # Subscribe to map and odometry with proper QoS
-        map_qos = rclpy.qos.QoSProfile(
-            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
-            durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
-            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
-        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        # Subscriptions are DISABLED because this instance is not spun as a standalone node.
+        # Data will be passed directly from ExplorerController.
         
         # Publish path for visualization (optional)
         self.path_pub = self.create_publisher(Path, '/planned_path', 10)
@@ -40,26 +33,26 @@ class PathPlanner(Node):
         self.map_info = None
         self.current_x = 0.0
         self.current_y = 0.0
+        self.cost_map = None # Initialized here to be created later by inflate_obstacles
         
         # A* parameters
         self.obstacle_cost_threshold = 50  # Cells with value > 50 are obstacles
         self.inflation_radius = 2  # Grid cells to inflate obstacles (safety margin)
         
-        self.get_logger().info('Path Planner Node started with A* algorithm')
+        self.get_logger().info('Path Planner Node started with A* algorithm (Data received externally)')
     
-    def map_callback(self, msg):
-        """Store the current map."""
-        self.map_info = msg.info
-        self.map_data = np.array(msg.data, dtype=np.int8).reshape(
-            msg.info.height, msg.info.width)
+    def update_data(self, map_data, map_info, current_x, current_y):
+        """Update map and pose data from the calling node."""
+        self.map_info = map_info
+        self.map_data = map_data
+        self.current_x = current_x
+        self.current_y = current_y
         
-        # Create cost map with inflated obstacles
-        self.cost_map = self.inflate_obstacles(self.map_data)
+        # Re-create cost map every time data is updated
+        if self.map_data is not None:
+            self.cost_map = self.inflate_obstacles(self.map_data)
     
-    def odom_callback(self, msg):
-        """Store current position."""
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
+    # map_callback and odom_callback methods are no longer needed
     
     def inflate_obstacles(self, grid):
         """
@@ -101,8 +94,8 @@ class PathPlanner(Node):
         if self.map_info is None:
             return None, None
         
-        x = self.map_info.origin.position.x + grid_x * self.map_info.resolution
-        y = self.map_info.origin.position.y + grid_y * self.map_info.resolution
+        x = self.map_info.origin.position.x + grid_x * self.map_info.resolution + (self.map_info.resolution / 2.0)
+        y = self.map_info.origin.position.y + grid_y * self.map_info.resolution + (self.map_info.resolution / 2.0)
         
         return x, y
     
@@ -118,7 +111,11 @@ class PathPlanner(Node):
             return False
         
         # Check if not obstacle (allow some cost for inflated areas)
-        return self.cost_map[grid_y, grid_x] < self.obstacle_cost_threshold
+        # Note: We must check for unknown/free (-1, 0) AND inflated cost (< obstacle_cost_threshold)
+        map_val = self.cost_map[grid_y, grid_x]
+        
+        # If it's unknown (-1) or too costly (>= 50), it's invalid for path planning
+        return map_val != -1 and map_val < self.obstacle_cost_threshold
     
     def heuristic(self, a, b):
         """Euclidean distance heuristic for A*."""
@@ -140,7 +137,12 @@ class PathPlanner(Node):
                 if self.is_valid_cell(nx, ny):
                     # Cost is higher for diagonal moves
                     cost = 1.414 if (dx != 0 and dy != 0) else 1.0
-                    neighbors.append(((nx, ny), cost))
+                    
+                    # Add cost from cost_map to traverse through this cell
+                    # Normalize map cost (0-100) to a path penalty (e.g., 0-5)
+                    map_cost = self.cost_map[ny, nx] / 20.0 
+                    
+                    neighbors.append(((nx, ny), cost + map_cost))
         
         return neighbors
     
@@ -170,31 +172,22 @@ class PathPlanner(Node):
         
         smoothed = [path[0]]
         
-        for i in range(1, len(path) - 1):
-            prev = path[i - 1]
-            curr = path[i]
-            next_p = path[i + 1]
-            
-            # Calculate direction vectors
-            vec1 = (curr[0] - prev[0], curr[1] - prev[1])
-            vec2 = (next_p[0] - curr[0], next_p[1] - curr[1])
-            
-            # Normalize
-            len1 = math.sqrt(vec1[0]**2 + vec1[1]**2)
-            len2 = math.sqrt(vec2[0]**2 + vec2[1]**2)
-            
-            if len1 > 0 and len2 > 0:
-                vec1 = (vec1[0]/len1, vec1[1]/len1)
-                vec2 = (vec2[0]/len2, vec2[1]/len2)
-                
-                # Dot product to check if direction changes
-                dot = vec1[0]*vec2[0] + vec1[1]*vec2[1]
-                
-                # Keep waypoint if direction changes significantly
-                if dot < 0.95:  # ~18 degree threshold
-                    smoothed.append(curr)
+        # Use a distance-based sampling to reduce the path complexity
+        MIN_DIST_SQUARED = 2**2 # Keep waypoints at least 2 cells apart
         
-        smoothed.append(path[-1])
+        for i in range(1, len(path) - 1):
+            curr = path[i]
+            last_smoothed = smoothed[-1]
+            
+            dist_sq = (curr[0] - last_smoothed[0])**2 + (curr[1] - last_smoothed[1])**2
+            
+            # Simple version: Only keep points that are significantly far away
+            if dist_sq >= MIN_DIST_SQUARED:
+                smoothed.append(curr)
+                
+        # Always add the final goal
+        if path[-1] != smoothed[-1]:
+            smoothed.append(path[-1])
         
         return smoothed
     
@@ -224,11 +217,11 @@ class PathPlanner(Node):
         
         # Check if start and goal are valid
         if not self.is_valid_cell(start_gx, start_gy):
-            self.get_logger().warn('Start position is in obstacle!')
+            self.get_logger().warn(f'Start position ({start_gx}, {start_gy}) is in obstacle! Map value: {self.cost_map[start_gy, start_gx]}')
             return None
         
         if not self.is_valid_cell(goal_gx, goal_gy):
-            self.get_logger().warn('Goal position is in obstacle!')
+            self.get_logger().warn(f'Goal position ({goal_gx}, {goal_gy}) is in obstacle! Map value: {self.cost_map[goal_gy, goal_gx]}')
             return None
         
         # A* algorithm
@@ -319,7 +312,9 @@ def main(args=None):
     node = PathPlanner()
     
     try:
-        rclpy.spin(node)
+        # Note: This file should be launched as a library, but if run standalone, 
+        # it will just sit and wait for data.
+        rclpy.spin(node) 
     except KeyboardInterrupt:
         pass
     

@@ -342,8 +342,16 @@ class ExplorerController(Node):
         if self.goal is None:
             self.goal = self.select_goal()
             
-            if self.goal:
+            if self.goal and self.map_data is not None: # Check for map data
                 self.get_logger().info(f'New goal selected: ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
+                
+                # --- CRITICAL FIX: Pass data to the Path Planner instance ---
+                self.path_planner.update_data(
+                    self.map_data, 
+                    self.map_info, 
+                    self.x, 
+                    self.y
+                )
                 
                 # Plan path using A*
                 path = self.path_planner.plan_path(self.goal[0], self.goal[1])
