@@ -2,22 +2,18 @@
 """
 Frontier Detector Node
 Subscribes to: /map
-Publishes to: /frontiers (custom message with list of points)
-
-For simplicity, we'll publish to a topic that the controller subscribes to.
+Publishes to: /frontiers (PointStamped array as individual messages)
 """
-
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PointStamped, Point
+from geometry_msgs.msg import PointStamped
 import numpy as np
 
 
 class FrontierDetector(Node):
     """
     Detects frontiers (boundaries between explored and unexplored areas).
-    
     DELIBERATIVE component: Processes map to find exploration targets.
     """
     
@@ -27,10 +23,8 @@ class FrontierDetector(Node):
         # Subscribe to map
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
         
-        # Publish frontiers (we'll use a simple approach - publish via parameter server or topic)
-        # For simplicity, store internally and let controller query via a service or shared state
-        # But to keep it truly modular with ROS principles, we should use a custom message
-        # For now, let's just store it and the controller will access it
+        # Publish frontier points
+        self.frontier_pub = self.create_publisher(PointStamped, '/frontiers', 10)
         
         self.map_data = None
         self.map_info = None
@@ -80,15 +74,21 @@ class FrontierDetector(Node):
         
         self.frontiers = frontier_cells
         
+        # Publish all frontiers
+        for wx, wy in self.frontiers:
+            point_msg = PointStamped()
+            point_msg.header.stamp = self.get_clock().now().to_msg()
+            point_msg.header.frame_id = 'map'
+            point_msg.point.x = wx
+            point_msg.point.y = wy
+            point_msg.point.z = 0.0
+            self.frontier_pub.publish(point_msg)
+        
         if len(self.frontiers) > 0:
             self.get_logger().info(f'Detected {len(self.frontiers)} frontier points', 
                                  throttle_duration_sec=2.0)
         else:
             self.get_logger().info('No frontiers detected', throttle_duration_sec=5.0)
-    
-    def get_frontiers(self):
-        """Returns current list of frontiers."""
-        return self.frontiers
 
 
 def main(args=None):

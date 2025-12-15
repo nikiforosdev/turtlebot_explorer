@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Explorer Controller Node (Main Coordinator)
-Subscribes to: /obstacle_detected, /reactive_cmd, /odom, /map
+Subscribes to: /obstacle_detected, /reactive_cmd, /odom, /map, /frontiers
 Publishes to: /cmd_vel (TwistStamped)
 
 Coordinates between reactive and deliberative behaviors.
@@ -10,7 +10,7 @@ Implements the HYBRID ARCHITECTURE.
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, TwistStamped
+from geometry_msgs.msg import Twist, TwistStamped, PointStamped
 from std_msgs.msg import Bool
 from nav_msgs.msg import Odometry, OccupancyGrid
 import numpy as np
@@ -37,6 +37,7 @@ class ExplorerController(Node):
         self.create_subscription(TwistStamped, '/reactive_cmd', self.reactive_cmd_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        self.create_subscription(PointStamped, '/frontiers', self.frontier_callback, 10)
         
         # State variables
         self.obstacle_detected = False
@@ -47,6 +48,18 @@ class ExplorerController(Node):
         self.map_data = None
         self.map_info = None
         self.goal = None
+        
+        # Store frontiers from frontier_detector node
+        self.frontiers = []
+        self.frontier_timeout = 2.0  # seconds
+        self.last_frontier_time = None
+        
+        # Startup exploration mode
+        self.startup_mode = True
+        self.startup_move_duration = 5.0  # Move forward for 5 seconds at startup
+        self.startup_start_time = None
+        self.no_frontier_counter = 0
+        self.no_frontier_threshold = 10  # After 10 cycles with no frontiers, try random exploration
         
         # Parameters
         self.goal_threshold = 0.3  # meters
@@ -83,58 +96,88 @@ class ExplorerController(Node):
         self.map_data = np.array(msg.data, dtype=np.int8).reshape(
             msg.info.height, msg.info.width)
     
-    def find_frontiers(self):
+    def frontier_callback(self, msg):
         """
-        Detect frontier cells.
-        Returns list of (x, y) in world coordinates.
+        Receive frontier points from frontier_detector node.
+        We accumulate them and reset the list periodically.
         """
-        if self.map_data is None:
-            return []
+        current_time = self.get_clock().now()
         
-        h, w = self.map_data.shape
-        frontiers = []
+        # If this is first frontier or timeout expired, reset list
+        if self.last_frontier_time is None or \
+           (current_time - self.last_frontier_time).nanoseconds / 1e9 > self.frontier_timeout:
+            self.frontiers = []
         
-        # Sample grid for frontiers
-        for i in range(5, h-5, 5):
-            for j in range(5, w-5, 5):
-                if self.map_data[i, j] == 0:  # Free cell
-                    # Check neighbors
-                    neighbors = [
-                        self.map_data[i-1, j],
-                        self.map_data[i+1, j],
-                        self.map_data[i, j-1],
-                        self.map_data[i, j+1]
-                    ]
-                    
-                    if -1 in neighbors:  # Adjacent to unknown
-                        # Convert to world coords
-                        wx = self.map_info.origin.position.x + j * self.map_info.resolution
-                        wy = self.map_info.origin.position.y + i * self.map_info.resolution
-                        frontiers.append((wx, wy))
-        
-        return frontiers
+        # Add new frontier
+        self.frontiers.append((msg.point.x, msg.point.y))
+        self.last_frontier_time = current_time
     
     def select_goal(self):
         """
-        Select next exploration goal.
+        Select next exploration goal from received frontiers.
         Returns (x, y) or None.
         """
-        frontiers = self.find_frontiers()
-        
-        if not frontiers:
+        # Check if we have recent frontiers
+        if not self.frontiers:
             return None
+        
+        # Check if frontier data is stale
+        if self.last_frontier_time is not None:
+            current_time = self.get_clock().now()
+            age = (current_time - self.last_frontier_time).nanoseconds / 1e9
+            if age > self.frontier_timeout:
+                self.get_logger().warn('Frontier data is stale')
+                return None
         
         # Select nearest frontier
         min_dist = float('inf')
         best = None
         
-        for fx, fy in frontiers:
+        for fx, fy in self.frontiers:
             dist = math.sqrt((fx - self.x)**2 + (fy - self.y)**2)
             if dist < min_dist and dist > 0.5:  # At least 0.5m away
                 min_dist = dist
                 best = (fx, fy)
         
         return best
+    
+    def compute_startup_command(self):
+        """
+        Generate exploratory movement when no frontiers exist yet.
+        This helps build initial map at startup.
+        """
+        cmd = self.create_twist_stamped()
+        
+        # Initialize startup timer
+        if self.startup_start_time is None:
+            self.startup_start_time = self.get_clock().now()
+        
+        # Move forward slowly for initial exploration
+        elapsed = (self.get_clock().now() - self.startup_start_time).nanoseconds / 1e9
+        
+        if elapsed < self.startup_move_duration:
+            cmd.twist.linear.x = 0.1
+            cmd.twist.angular.z = 0.0
+            return cmd
+        else:
+            # After initial movement, disable startup mode
+            self.startup_mode = False
+            self.startup_start_time = None
+            return self.create_twist_stamped()  # Stop
+    
+    def compute_random_exploration_command(self):
+        """
+        When stuck with no frontiers for a while, try random exploration.
+        This helps escape local minima or find new areas.
+        """
+        cmd = self.create_twist_stamped()
+        
+        # Random walk: move forward and turn slightly
+        import random
+        cmd.twist.linear.x = 0.15
+        cmd.twist.angular.z = random.uniform(-0.5, 0.5)
+        
+        return cmd
     
     def compute_navigation_command(self):
         """
@@ -188,13 +231,22 @@ class ExplorerController(Node):
         
         Priority hierarchy:
         1. REACTIVE: If obstacle detected, use reactive command
-        2. DELIBERATIVE: Otherwise, navigate to exploration goal
+        2. STARTUP: Initial exploration to build map
+        3. DELIBERATIVE: Navigate to exploration goals
+        4. RANDOM: If stuck without frontiers, random exploration
         """
         
         # REACTIVE LAYER (Highest Priority)
         if self.obstacle_detected and self.reactive_cmd is not None:
             self.cmd_pub.publish(self.reactive_cmd)
             self.get_logger().info('REACTIVE MODE', throttle_duration_sec=1.0)
+            return
+        
+        # STARTUP MODE - Build initial map
+        if self.startup_mode:
+            cmd = self.compute_startup_command()
+            self.cmd_pub.publish(cmd)
+            self.get_logger().info('STARTUP MODE - Building initial map', throttle_duration_sec=1.0)
             return
         
         # DELIBERATIVE LAYER
@@ -205,11 +257,27 @@ class ExplorerController(Node):
             
             if self.goal:
                 self.get_logger().info(f'DELIBERATIVE: New goal ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
+                self.no_frontier_counter = 0  # Reset counter when frontier found
             else:
-                self.get_logger().info('No frontiers - exploration complete?', 
-                                     throttle_duration_sec=2.0)
-                self.cmd_pub.publish(self.create_twist_stamped())  # Stop
-                return
+                # No frontiers available
+                self.no_frontier_counter += 1
+                
+                # If stuck without frontiers for a while, try random exploration
+                if self.no_frontier_counter > self.no_frontier_threshold:
+                    cmd = self.compute_random_exploration_command()
+                    self.cmd_pub.publish(cmd)
+                    self.get_logger().info('RANDOM EXPLORATION MODE - No frontiers, exploring randomly', 
+                                         throttle_duration_sec=2.0)
+                    
+                    # Reset counter periodically to check for new frontiers
+                    if self.no_frontier_counter > self.no_frontier_threshold + 20:
+                        self.no_frontier_counter = 0
+                    return
+                else:
+                    self.get_logger().info('No frontiers - waiting for map updates...', 
+                                         throttle_duration_sec=2.0)
+                    self.cmd_pub.publish(self.create_twist_stamped())  # Stop
+                    return
         
         # Navigate to goal
         cmd = self.compute_navigation_command()
