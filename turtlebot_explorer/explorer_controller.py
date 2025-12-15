@@ -58,7 +58,7 @@ class ExplorerController(Node):
         self.goal = None
         
         # Import path planner
-        from path_planner import PathPlanner
+        from turtlebot_explorer.path_planner import PathPlanner
         self.path_planner = PathPlanner()
         
         # Path following
