@@ -50,57 +50,88 @@ class FrontierDetector(Node):
     
     def detect_frontiers(self):
         """
-        Main frontier detection algorithm.
-        Finds cells that are free (0) and adjacent to unknown cells (-1).
-        
-        
+        Main frontier detection algorithm with clustering.
+        1. Find all raw frontier cells (Free=0, neighbor Unknown=-1).
+        2. Cluster nearby cells.
+        3. Publish the centroid of each cluster as a goal.
         """
         if self.map_data is None:
             self.get_logger().warn('No map data yet!')
             return
         
         h, w = self.map_data.shape
-        frontier_cells = []
+        raw_frontier_cells_grid = []
         
-        # Scan grid for frontier cells - Check all cells
-        # Start at 1 and end at h/w-1 to safely check 8 neighbors
+        # 1. FIND RAW FRONTIER CELLS (Grid Coordinates)
         for i in range(1, h - 1):
             for j in range(1, w - 1):
                 current = self.map_data[i, j]
                 
                 # Cell must be Free space (Standard ROS: 0)
                 if current == 0:  
-                    
-                    # Check 8-connected neighbors
                     neighbors = [
-                        self.map_data[i-1, j],
-                        self.map_data[i+1, j],
-                        self.map_data[i, j-1],
-                        self.map_data[i, j+1],
-                        self.map_data[i-1, j-1],
-                        self.map_data[i-1, j+1],
-                        self.map_data[i+1, j-1],
-                        self.map_data[i+1, j+1]
+                        self.map_data[i+di, j+dj] 
+                        for di in [-1, 0, 1] 
+                        for dj in [-1, 0, 1] 
+                        if not (di == 0 and dj == 0)
                     ]
                     
                     # Frontier if any neighbor is Unknown (Standard ROS: -1)
                     has_unknown = any(n == -1 for n in neighbors)
                     
                     if has_unknown:
-                        # Convert to world coordinates (using center of cell: +0.5 * resolution)
-                        wx = self.map_info.origin.position.x + (j + 0.5) * self.map_info.resolution
-                        wy = self.map_info.origin.position.y + (i + 0.5) * self.map_info.resolution
-                        frontier_cells.append((wx, wy))
+                        raw_frontier_cells_grid.append((j, i)) # Note: (col, row) -> (x, y)
         
-        self.frontiers = frontier_cells
-        
-        if len(frontier_cells) > 0:
-            self.get_logger().info(f'✓ Found {len(frontier_cells)} frontiers!')
-        else:
+        if not raw_frontier_cells_grid:
             self.get_logger().info('✗ No frontiers detected', throttle_duration_sec=3.0)
+            self.frontiers = []
+            return
+            
+        # 2. CLUSTER FRONTIER CELLS
+        # This is a simple nearest-neighbor clustering approach
+        clusters = []
         
-        # Publish all frontiers
-        for wx, wy in self.frontiers:
+        for p1_x, p1_y in raw_frontier_cells_grid:
+            found_cluster = False
+            
+            for cluster in clusters:
+                # Check if p1 is close to the centroid of this cluster
+                c_x, c_y = cluster['centroid']
+                
+                # Use grid distance squared for efficiency
+                dist_sq = (p1_x - c_x)**2 + (p1_y - c_y)**2
+                
+                if dist_sq < self.cluster_dist_sq:
+                    # Add to cluster and update centroid
+                    cluster['points'].append((p1_x, p1_y))
+                    
+                    # Update centroid (simple running average)
+                    count = len(cluster['points'])
+                    new_c_x = (c_x * (count - 1) + p1_x) / count
+                    new_c_y = (c_y * (count - 1) + p1_y) / count
+                    cluster['centroid'] = (new_c_x, new_c_y)
+                    
+                    found_cluster = True
+                    break
+            
+            if not found_cluster:
+                # Start a new cluster
+                clusters.append({
+                    'centroid': (p1_x, p1_y), 
+                    'points': [(p1_x, p1_y)]
+                })
+
+        # 3. PUBLISH CENTROIDS (World Coordinates)
+        self.frontiers = []
+        for cluster in clusters:
+            gx, gy = cluster['centroid']
+            
+            # Convert centroid grid coordinates to world coordinates
+            wx = self.map_info.origin.position.x + gx * self.map_info.resolution + (self.map_info.resolution / 2.0)
+            wy = self.map_info.origin.position.y + gy * self.map_info.resolution + (self.map_info.resolution / 2.0)
+            self.frontiers.append((wx, wy))
+            
+            # Publish point
             point_msg = PointStamped()
             point_msg.header.stamp = self.get_clock().now().to_msg()
             point_msg.header.frame_id = 'map'
@@ -108,6 +139,8 @@ class FrontierDetector(Node):
             point_msg.point.y = wy
             point_msg.point.z = 0.0
             self.frontier_pub.publish(point_msg)
+
+        self.get_logger().info(f'✓ Found {len(self.frontiers)} viable frontier clusters!')
 
 
 def main(args=None):
