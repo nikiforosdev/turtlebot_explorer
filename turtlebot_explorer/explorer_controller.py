@@ -15,6 +15,7 @@ from std_msgs.msg import Bool
 from nav_msgs.msg import Odometry, OccupancyGrid
 import numpy as np
 import math
+from nav_msgs.msg import Path
 
 
 class ExplorerController(Node):
@@ -29,13 +30,14 @@ class ExplorerController(Node):
     def __init__(self):
         super().__init__('explorer_controller')
         
-        # Publishers - CHANGED TO TwistStamped
+        # Publishers
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
+        
+        # Subscribers
         self.create_subscription(Bool, '/obstacle_detected', self.obstacle_callback, 10)
         self.create_subscription(TwistStamped, '/reactive_cmd', self.reactive_cmd_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         
-        # Map subscription with proper QoS
         map_qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
             durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
@@ -43,9 +45,7 @@ class ExplorerController(Node):
             depth=1
         )
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
-        
         self.create_subscription(PointStamped, '/frontiers', self.frontier_callback, 10)
-
         
         # State variables
         self.obstacle_detected = False
@@ -57,27 +57,41 @@ class ExplorerController(Node):
         self.map_info = None
         self.goal = None
         
-        # Store frontiers from frontier_detector node
+        # Import path planner
+        from path_planner import PathPlanner
+        self.path_planner = PathPlanner()
+        
+        # Path following
+        self.current_path = []  # List of waypoints
+        self.current_waypoint_index = 0
+        self.waypoint_threshold = 0.3  # meters
+        
+        # Store frontiers
         self.frontiers = []
-        self.frontier_timeout = 2.0  # seconds
+        self.frontier_timeout = 2.0
         self.last_frontier_time = None
         
         # Startup exploration mode
         self.startup_mode = True
-        self.startup_move_duration = 5.0  # Move forward for 5 seconds at startup
+        self.startup_move_duration = 5.0
         self.startup_start_time = None
         self.no_frontier_counter = 0
-        self.no_frontier_threshold = 10  # After 10 cycles with no frontiers, try random exploration
+        self.no_frontier_threshold = 10
+        
+        # Goal parameters
+        self.goal_threshold = 0.3
+        self.goal_timeout = 20.0  # Increased for path following
+        self.goal_start_time = None
+        self.min_goal_distance = 1.0
         
         # Parameters
-        self.goal_threshold = 0.3  # meters
-        self.max_linear = 0.22  # m/s
-        self.max_angular = 2.84  # rad/s
+        self.max_linear = 0.22
+        self.max_angular = 2.84
         
         # Control loop
-        self.create_timer(0.1, self.control_loop)  # 10 Hz
+        self.create_timer(0.1, self.control_loop)
         
-        self.get_logger().info('Explorer Controller Node started')
+        self.get_logger().info('Explorer Controller with A* path planning started')
     
     def obstacle_callback(self, msg):
         """Update obstacle detection status."""
@@ -233,69 +247,131 @@ class ExplorerController(Node):
         msg.header.frame_id = 'base_link'
         return msg
     
+    def compute_waypoint_navigation_command(self):
+        """
+        Navigate along the planned path by following waypoints.
+        Returns TwistStamped command or None if waypoint reached.
+        """
+        if not self.current_path or self.current_waypoint_index >= len(self.current_path):
+            return None
+        
+        # Get current target waypoint
+        target_x, target_y = self.current_path[self.current_waypoint_index]
+        
+        # Calculate distance to waypoint
+        dx = target_x - self.x
+        dy = target_y - self.y
+        dist = math.sqrt(dx**2 + dy**2)
+        
+        # Check if waypoint reached
+        if dist < self.waypoint_threshold:
+            self.current_waypoint_index += 1
+            self.get_logger().info(f'Waypoint {self.current_waypoint_index}/{len(self.current_path)} reached')
+            
+            # Check if this was the last waypoint
+            if self.current_waypoint_index >= len(self.current_path):
+                return None  # Path complete
+            
+            # Move to next waypoint
+            return self.compute_waypoint_navigation_command()
+        
+        # Navigate to current waypoint
+        desired_yaw = math.atan2(dy, dx)
+        angle_error = desired_yaw - self.yaw
+        angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
+        
+        cmd = self.create_twist_stamped()
+        
+        if abs(angle_error) > 0.2:
+            # Turn toward waypoint
+            cmd.twist.linear.x = 0.05
+            cmd.twist.angular.z = np.clip(2.0 * angle_error, -self.max_angular, self.max_angular)
+        else:
+            # Move forward
+            cmd.twist.linear.x = np.clip(0.5 * dist, 0.0, self.max_linear)
+            cmd.twist.angular.z = np.clip(1.0 * angle_error, -0.5, 0.5)
+        
+        return cmd
+
     def control_loop(self):
         """
-        MAIN HYBRID CONTROL LOOP
-        
-        Priority hierarchy:
-        1. REACTIVE: If obstacle detected, use reactive command
-        2. STARTUP: Initial exploration to build map
-        3. DELIBERATIVE: Navigate to exploration goals
-        4. RANDOM: If stuck without frontiers, random exploration
+        MAIN HYBRID CONTROL LOOP with A* path following
         """
-        
-        # REACTIVE LAYER (Highest Priority)
+        # REACTIVE LAYER
         if self.obstacle_detected and self.reactive_cmd is not None:
             self.cmd_pub.publish(self.reactive_cmd)
             self.get_logger().info('REACTIVE MODE', throttle_duration_sec=1.0)
             return
         
-        # STARTUP MODE - Build initial map
+        # STARTUP MODE
         if self.startup_mode:
             cmd = self.compute_startup_command()
             self.cmd_pub.publish(cmd)
-            self.get_logger().info('STARTUP MODE - Building initial map', throttle_duration_sec=1.0)
+            self.get_logger().info('STARTUP MODE', throttle_duration_sec=1.0)
             return
         
-        # DELIBERATIVE LAYER
+        # DELIBERATIVE LAYER - Path following
         
-        # Need new goal?
+        # Check if we have a valid path to follow
+        if self.current_path and self.current_waypoint_index < len(self.current_path):
+            # Check timeout
+            if self.goal_start_time is not None:
+                elapsed = (self.get_clock().now() - self.goal_start_time).nanoseconds / 1e9
+                if elapsed > self.goal_timeout:
+                    self.get_logger().info('Path timeout - replanning')
+                    self.current_path = []
+                    self.goal = None
+                    self.goal_start_time = None
+            
+            # Follow the path
+            cmd = self.compute_waypoint_navigation_command()
+            
+            if cmd is None:
+                # Path complete
+                self.get_logger().info('Path complete! Goal reached.')
+                self.current_path = []
+                self.current_waypoint_index = 0
+                self.goal = None
+                self.goal_start_time = None
+                cmd = self.create_twist_stamped()
+            
+            self.cmd_pub.publish(cmd)
+            return
+        
+        # Need new goal and path
         if self.goal is None:
             self.goal = self.select_goal()
             
             if self.goal:
-                self.get_logger().info(f'DELIBERATIVE: New goal ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
-                self.no_frontier_counter = 0  # Reset counter when frontier found
+                self.get_logger().info(f'New goal selected: ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
+                
+                # Plan path using A*
+                path = self.path_planner.plan_path(self.goal[0], self.goal[1])
+                
+                if path and len(path) > 0:
+                    self.current_path = path
+                    self.current_waypoint_index = 0
+                    self.goal_start_time = self.get_clock().now()
+                    self.no_frontier_counter = 0
+                    self.get_logger().info(f'Path planned with {len(path)} waypoints')
+                else:
+                    self.get_logger().warn('Path planning failed! Trying different goal.')
+                    self.goal = None
             else:
-                # No frontiers available
+                # No frontiers
                 self.no_frontier_counter += 1
                 
-                # If stuck without frontiers for a while, try random exploration
                 if self.no_frontier_counter > self.no_frontier_threshold:
                     cmd = self.compute_random_exploration_command()
                     self.cmd_pub.publish(cmd)
-                    self.get_logger().info('RANDOM EXPLORATION MODE - No frontiers, exploring randomly', 
-                                         throttle_duration_sec=2.0)
-                    
-                    # Reset counter periodically to check for new frontiers
+                    self.get_logger().info('RANDOM EXPLORATION', throttle_duration_sec=2.0)
                     if self.no_frontier_counter > self.no_frontier_threshold + 20:
                         self.no_frontier_counter = 0
                     return
                 else:
-                    self.get_logger().info('No frontiers - waiting for map updates...', 
-                                         throttle_duration_sec=2.0)
-                    self.cmd_pub.publish(self.create_twist_stamped())  # Stop
+                    self.get_logger().info('No frontiers - waiting...', throttle_duration_sec=2.0)
+                    self.cmd_pub.publish(self.create_twist_stamped())
                     return
-        
-        # Navigate to goal
-        cmd = self.compute_navigation_command()
-        
-        if cmd is None:  # Goal reached
-            self.get_logger().info('Goal reached!')
-            self.goal = None
-            cmd = self.create_twist_stamped()
-        
-        self.cmd_pub.publish(cmd)
 
 
 def main(args=None):

@@ -41,7 +41,7 @@ class ReactiveController(Node):
         self.laser_ranges = None
         
         # Parameters
-        self.obstacle_threshold = 0.8  # meters
+        self.obstacle_threshold = 0.4  # meters
         
         # Timer for reactive control
         self.create_timer(0.1, self.reactive_control_loop)  # 10 Hz
