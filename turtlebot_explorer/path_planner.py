@@ -75,7 +75,7 @@ class PathPlanner(Node):
                         dist = math.sqrt(di*di + dj*dj)
                         if dist <= self.inflation_radius:
                             # Increase cost near obstacles
-                            cost_map[ni, nj] = max(cost_map[ni, nj], 80)
+                            cost_map[ni, nj] = max(cost_map[ni, nj], 60)
         
         return cost_map
     
