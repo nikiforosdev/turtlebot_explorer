@@ -2,7 +2,7 @@
 """
 Reactive Controller Node
 Subscribes to: /scan
-Publishes to: /reactive_cmd (Twist commands when avoiding obstacles)
+Publishes to: /reactive_cmd (TwistStamped commands when avoiding obstacles)
 
 REACTIVE layer: Fast obstacle avoidance using laser scanner
 """
@@ -10,7 +10,7 @@ REACTIVE layer: Fast obstacle avoidance using laser scanner
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Bool
 import numpy as np
 
@@ -34,8 +34,8 @@ class ReactiveController(Node):
         
         self.create_subscription(LaserScan, '/scan', self.laser_callback, qos)
         
-        # Publish reactive commands and obstacle status
-        self.cmd_pub = self.create_publisher(Twist, '/reactive_cmd', 10)
+        # Publish reactive commands and obstacle status - CHANGED TO TwistStamped
+        self.cmd_pub = self.create_publisher(TwistStamped, '/reactive_cmd', 10)
         self.obstacle_pub = self.create_publisher(Bool, '/obstacle_detected', 10)
         
         self.laser_ranges = None
@@ -83,9 +83,11 @@ class ReactiveController(Node):
         Strategy: Turn towards more open space while moving slowly forward.
         
         Returns:
-            Twist command for obstacle avoidance
+            TwistStamped command for obstacle avoidance
         """
-        cmd = Twist()
+        cmd = TwistStamped()
+        cmd.header.stamp = self.get_clock().now().to_msg()
+        cmd.header.frame_id = 'base_link'
         
         if self.laser_ranges is None:
             return cmd
@@ -99,13 +101,13 @@ class ReactiveController(Node):
         avg_right = np.mean(right_side)
         
         # Slow forward motion
-        cmd.linear.x = 0.05
+        cmd.twist.linear.x = 0.05
         
         # Turn towards more open space
         if avg_left > avg_right:
-            cmd.angular.z = 0.5  # Turn left
+            cmd.twist.angular.z = 0.5  # Turn left
         else:
-            cmd.angular.z = -0.5  # Turn right
+            cmd.twist.angular.z = -0.5  # Turn right
         
         return cmd
     
@@ -118,7 +120,7 @@ class ReactiveController(Node):
         
         # Publish obstacle status
         status_msg = Bool()
-        status_msg.data = obstacle_detected
+        status_msg.data = bool(obstacle_detected)
         self.obstacle_pub.publish(status_msg)
         
         # If obstacle detected, compute and publish avoidance command

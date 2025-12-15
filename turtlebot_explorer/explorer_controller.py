@@ -2,7 +2,7 @@
 """
 Explorer Controller Node (Main Coordinator)
 Subscribes to: /obstacle_detected, /reactive_cmd, /odom, /map
-Publishes to: /cmd_vel
+Publishes to: /cmd_vel (TwistStamped)
 
 Coordinates between reactive and deliberative behaviors.
 Implements the HYBRID ARCHITECTURE.
@@ -10,7 +10,7 @@ Implements the HYBRID ARCHITECTURE.
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from std_msgs.msg import Bool
 from nav_msgs.msg import Odometry, OccupancyGrid
 import numpy as np
@@ -29,12 +29,12 @@ class ExplorerController(Node):
     def __init__(self):
         super().__init__('explorer_controller')
         
-        # Publishers
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Publishers - CHANGED TO TwistStamped
+        self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         
         # Subscribers
         self.create_subscription(Bool, '/obstacle_detected', self.obstacle_callback, 10)
-        self.create_subscription(Twist, '/reactive_cmd', self.reactive_cmd_callback, 10)
+        self.create_subscription(TwistStamped, '/reactive_cmd', self.reactive_cmd_callback, 10)
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
         
@@ -142,10 +142,10 @@ class ExplorerController(Node):
         DELIBERATIVE behavior.
         
         Returns:
-            Twist command or None if goal reached
+            TwistStamped command or None if goal reached
         """
         if self.goal is None:
-            return Twist()
+            return self.create_twist_stamped()
         
         # Calculate distance and angle to goal
         dx = self.goal[0] - self.x
@@ -164,16 +164,23 @@ class ExplorerController(Node):
         angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
         
         # Proportional control
-        cmd = Twist()
+        cmd = self.create_twist_stamped()
         
         if abs(angle_error) > 0.2:  # Need to turn
-            cmd.linear.x = 0.05
-            cmd.angular.z = np.clip(2.0 * angle_error, -self.max_angular, self.max_angular)
+            cmd.twist.linear.x = 0.05
+            cmd.twist.angular.z = np.clip(2.0 * angle_error, -self.max_angular, self.max_angular)
         else:  # Move forward
-            cmd.linear.x = np.clip(0.5 * dist, 0.0, self.max_linear)
-            cmd.angular.z = np.clip(1.0 * angle_error, -0.5, 0.5)
+            cmd.twist.linear.x = np.clip(0.5 * dist, 0.0, self.max_linear)
+            cmd.twist.angular.z = np.clip(1.0 * angle_error, -0.5, 0.5)
         
         return cmd
+    
+    def create_twist_stamped(self):
+        """Helper to create TwistStamped message with current timestamp."""
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        return msg
     
     def control_loop(self):
         """
@@ -201,7 +208,7 @@ class ExplorerController(Node):
             else:
                 self.get_logger().info('No frontiers - exploration complete?', 
                                      throttle_duration_sec=2.0)
-                self.cmd_pub.publish(Twist())  # Stop
+                self.cmd_pub.publish(self.create_twist_stamped())  # Stop
                 return
         
         # Navigate to goal
@@ -210,7 +217,7 @@ class ExplorerController(Node):
         if cmd is None:  # Goal reached
             self.get_logger().info('Goal reached!')
             self.goal = None
-            cmd = Twist()
+            cmd = self.create_twist_stamped()
         
         self.cmd_pub.publish(cmd)
 
