@@ -8,15 +8,11 @@ import heapq
 
 
 class PathPlanner(Node):
-    """
-    Plans collision-free paths using A* algorithm.
-    DELIBERATIVE component: Creates paths from current position to goal.
-    """
-    
+
+
     def __init__(self):
         super().__init__('path_planner')
         
-        # Publish path for visualization (optional)
         self.path_pub = self.create_publisher(Path, '/planned_path', 10)
         
         self.map_data = None
@@ -32,7 +28,6 @@ class PathPlanner(Node):
         self.get_logger().info('Path Planner Node started with A* algorithm (FIXED VERSION)')
     
     def update_data(self, map_data, map_info, current_x, current_y):
-        """Update map and pose data from the calling node."""
         self.map_info = map_info
         self.map_data = map_data
         self.current_x = current_x
@@ -43,10 +38,6 @@ class PathPlanner(Node):
             self.cost_map = self.inflate_obstacles(self.map_data)
     
     def inflate_obstacles(self, grid):
-        """
-        Inflate obstacles for safety margin - IMPROVED VERSION
-        Returns a cost map where high values = obstacles or near obstacles.
-        """
         h, w = grid.shape
         cost_map = np.copy(grid).astype(np.float32)
         
@@ -77,7 +68,6 @@ class PathPlanner(Node):
         return cost_map
     
     def world_to_grid(self, x, y):
-        """Convert world coordinates to grid coordinates."""
         if self.map_info is None:
             return None, None
         
@@ -87,7 +77,6 @@ class PathPlanner(Node):
         return grid_x, grid_y
     
     def grid_to_world(self, grid_x, grid_y):
-        """Convert grid coordinates to world coordinates."""
         if self.map_info is None:
             return None, None
         
@@ -97,7 +86,6 @@ class PathPlanner(Node):
         return x, y
     
     def is_valid_cell(self, grid_x, grid_y):
-        """Check if grid cell is valid and not an obstacle - IMPROVED VERSION"""
         if self.cost_map is None:
             return False
         
@@ -115,7 +103,7 @@ class PathPlanner(Node):
         return map_val < self.obstacle_cost_threshold
     
     def heuristic(self, a, b):
-        """Euclidean distance heuristic for A*."""
+        #euclidean dist
         return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
     
     def get_neighbors(self, cell):
@@ -123,7 +111,7 @@ class PathPlanner(Node):
         x, y = cell
         neighbors = []
         
-        # 8-connected neighbors
+        # 8 connected neighbors
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 if dx == 0 and dy == 0:
@@ -136,7 +124,7 @@ class PathPlanner(Node):
                     base_cost = 1.414 if (dx != 0 and dy != 0) else 1.0
                     
                     # Add cost from cost_map - penalize high-cost areas more
-                    map_cost = self.cost_map[ny, nx] / 10.0  # Scale cost appropriately
+                    map_cost = self.cost_map[ny, nx] / 10.0  # scale
                     
                     total_cost = base_cost + map_cost
                     neighbors.append(((nx, ny), total_cost))
@@ -144,7 +132,7 @@ class PathPlanner(Node):
         return neighbors
     
     def reconstruct_path(self, came_from, start, goal):
-        """Reconstruct path from A* came_from dict."""
+        # from a star
         path = []
         current = goal
         
@@ -160,16 +148,14 @@ class PathPlanner(Node):
         return path
     
     def smooth_path(self, path):
-        """
-        Simplify path by removing unnecessary waypoints - IMPROVED VERSION
-        """
+        # remove waypoints id needed
         if len(path) < 3:
             return path
         
         smoothed = [path[0]]
         
         # Increased minimum distance for better path following
-        MIN_DIST_SQUARED = 4**2  # Keep waypoints at least 4 cells apart (was 2)
+        MIN_DIST_SQUARED = 4**2
         
         for i in range(1, len(path) - 1):
             curr = path[i]
@@ -188,21 +174,14 @@ class PathPlanner(Node):
     
     def plan_path(self, goal_x, goal_y):
         """
-        Plan a path using A* algorithm.
-        
-        Args:
-            goal_x: Goal x coordinate in world frame
-            goal_y: Goal y coordinate in world frame
-        
-        Returns:
-            List of waypoints [(x1,y1), (x2,y2), ...] in world coordinates
-            or None if no path found
+        A STAR ALGORITHM
+        Produces list of waypoints
         """
         if self.map_data is None or self.cost_map is None:
             self.get_logger().warn('No map data available for planning')
             return None
         
-        # Convert to grid coordinates
+
         start_gx, start_gy = self.world_to_grid(self.current_x, self.current_y)
         goal_gx, goal_gy = self.world_to_grid(goal_x, goal_y)
         
@@ -210,7 +189,8 @@ class PathPlanner(Node):
             self.get_logger().warn('Invalid coordinates for planning')
             return None
         
-        # Check if start and goal are valid
+
+
         if not self.is_valid_cell(start_gx, start_gy):
             self.get_logger().warn(f'Start position ({start_gx}, {start_gy}) is in obstacle! Cost: {self.cost_map[start_gy, start_gx]:.1f}')
             return None
@@ -238,7 +218,7 @@ class PathPlanner(Node):
         
         closed_set = set()
         
-        max_iterations = 10000  # Prevent infinite loops
+        max_iterations = 10000
         iterations = 0
         
         while open_set and iterations < max_iterations:
@@ -255,7 +235,6 @@ class PathPlanner(Node):
                 if grid_path is None:
                     return None
                 
-                # Smooth the path
                 grid_path = self.smooth_path(grid_path)
                 
                 # Convert to world coordinates
@@ -266,7 +245,7 @@ class PathPlanner(Node):
                 
                 self.get_logger().info(f'Path found with {len(world_path)} waypoints after {iterations} iterations')
                 
-                # Publish path for visualization
+                #for viz
                 self.publish_path(world_path)
                 
                 return world_path
@@ -292,7 +271,6 @@ class PathPlanner(Node):
         return None
     
     def find_nearest_valid_cell(self, goal_gx, goal_gy, search_radius=5):
-        """Find the nearest valid cell to an invalid goal position."""
         best_cell = None
         min_dist = float('inf')
         
@@ -309,7 +287,7 @@ class PathPlanner(Node):
         return best_cell if best_cell else (None, None)
     
     def publish_path(self, waypoints):
-        """Publish path for visualization in RViz."""
+        #for RViz
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
         path_msg.header.frame_id = 'map'

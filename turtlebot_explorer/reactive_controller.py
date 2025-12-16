@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-Reactive Controller Node
-Subscribes to: /scan
-Publishes to: /reactive_cmd (TwistStamped commands when avoiding obstacles)
-
-REACTIVE layer: Fast obstacle avoidance using laser scanner
-"""
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -16,12 +7,6 @@ import numpy as np
 
 
 class ReactiveController(Node):
-    """
-    Reactive obstacle avoidance using laser scanner.
-    
-    REACTIVE component: Fast response to immediate obstacles.
-    Runs at high frequency (~10 Hz) independent of map updates.
-    """
     
     def __init__(self):
         super().__init__('reactive_controller')
@@ -48,19 +33,19 @@ class ReactiveController(Node):
         
         self.get_logger().info('Reactive Controller Node started')
     
+
+
+
     def laser_callback(self, msg):
-        """Store laser scan data."""
         self.laser_ranges = np.array(msg.ranges)
         # Replace inf with max range
         self.laser_ranges[np.isinf(self.laser_ranges)] = 10.0
     
+
+
+
     def check_obstacle(self):
-        """
-        Check if obstacle is too close in front sector.
-        
-        Returns:
-            True if obstacle detected within threshold
-        """
+        ##check if obstacle within threshold ##
         if self.laser_ranges is None:
             return False
         
@@ -80,15 +65,11 @@ class ReactiveController(Node):
         
         return min_distance < self.obstacle_threshold
     
+
+
+
     def compute_avoidance_command(self):
-        """
-        Compute velocity command to avoid obstacle.
-        
-        Strategy: Turn towards more open space while moving slowly forward.
-        
-        Returns:
-            TwistStamped command for obstacle avoidance
-        """
+        ## obstacle avoidance ##
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.header.frame_id = 'base_link'
@@ -115,11 +96,11 @@ class ReactiveController(Node):
         
         return cmd
     
+
+
+    
     def reactive_control_loop(self):
-        """
-        Main reactive control loop.
-        Publishes obstacle status and avoidance commands if needed.
-        """
+        ## MAIN REACTIVE CONTROL LOOP ##
         obstacle_detected = self.check_obstacle()
         
         # Publish obstacle status

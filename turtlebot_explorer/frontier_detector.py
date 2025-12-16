@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-"""
-Frontier Detector Node
-Subscribes to: /map
-Publishes to: /frontiers (PointStamped array as individual messages)
-"""
+
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
@@ -12,11 +7,7 @@ import numpy as np
 
 
 class FrontierDetector(Node):
-    """
-    Detects frontiers (boundaries between explored and unexplored areas).
-    DELIBERATIVE component: Processes map to find exploration targets.
-    """
-    
+
     def __init__(self):
         super().__init__('frontier_detector')
     
@@ -30,31 +21,23 @@ class FrontierDetector(Node):
         
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, qos)
         
-        # Publish frontier points
+        # Publisher
         self.frontier_pub = self.create_publisher(PointStamped, '/frontiers', 10)
         
         self.map_data = None
         self.map_info = None
         self.frontiers = []
         
-        # Timer to periodically detect frontiers
         self.create_timer(1.0, self.detect_frontiers)  # 1 Hz
         
         self.get_logger().info('Frontier Detector Node started')
     
     def map_callback(self, msg):
-        """Store the current map."""
         self.map_info = msg.info
         self.map_data = np.array(msg.data, dtype=np.int8).reshape(
             msg.info.height, msg.info.width)
     
     def detect_frontiers(self):
-        """
-        Main frontier detection algorithm.
-        Finds cells that are free (0) and adjacent to unknown cells (-1).
-        
-        
-        """
         if self.map_data is None:
             self.get_logger().warn('No map data yet!')
             return

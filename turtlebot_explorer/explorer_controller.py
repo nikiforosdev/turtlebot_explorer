@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-Explorer Controller Node (Main Coordinator) - IMPROVED VERSION
-Key improvements:
-1. Better frontier validation (check if frontier is reachable)
-2. Slower, more careful navigation
-3. Better obstacle handling during path following
-"""
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TwistStamped, PointStamped
@@ -18,13 +9,7 @@ from nav_msgs.msg import Path
 
 
 class ExplorerController(Node):
-    """
-    Main coordinator implementing hybrid architecture.
-    
-    Combines:
-    - REACTIVE layer: Obstacle avoidance (high priority)
-    - DELIBERATIVE layer: Goal-directed exploration (low priority)
-    """
+    #COORDINATES REACTIVE DELIVERATIVE
     
     def __init__(self):
         super().__init__('explorer_controller')
@@ -79,40 +64,33 @@ class ExplorerController(Node):
         
         # Goal parameters
         self.goal_threshold = 0.3
-        self.goal_timeout = 30.0  # Increased timeout
+        self.goal_timeout = 30.0
         self.goal_start_time = None
-        self.min_goal_distance = 1.0  # Minimum distance to goal
+        self.min_goal_distance = 1.0
         
-        # Parameters - REDUCED SPEEDS FOR SAFETY
-        self.max_linear = 0.15  # Reduced from 0.22
-        self.max_angular = 2.0  # Reduced from 2.84
+        self.max_linear = 0.15 
+        self.max_angular = 2.0
         
         # Control loop
         self.create_timer(0.1, self.control_loop)
-        
-        self.get_logger().info('Explorer Controller with IMPROVED path planning started')
     
     def obstacle_callback(self, msg):
-        """Update obstacle detection status."""
         self.obstacle_detected = msg.data
     
     def reactive_cmd_callback(self, msg):
-        """Store reactive avoidance command."""
         self.reactive_cmd = msg
     
     def odom_callback(self, msg):
-        """Update robot pose."""
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         
-        # Convert quaternion to yaw
+        # here we convert quaternion to yaw
         q = msg.pose.pose.orientation
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.yaw = math.atan2(siny, cosy)
     
     def map_callback(self, msg):
-        """Update map."""
         self.map_info = msg.info
         self.map_data = np.array(msg.data, dtype=np.int8).reshape(
             msg.info.height, msg.info.width)
@@ -166,10 +144,8 @@ class ExplorerController(Node):
         return True
     
     def select_goal(self):
-        """
-        Select next exploration goal from received frontiers - IMPROVED VERSION
-        Returns (x, y) or None.
-        """
+        #Returns (x, y) or None.
+        
         # Check if we have recent frontiers
         if not self.frontiers:
             return None
@@ -203,9 +179,6 @@ class ExplorerController(Node):
         return (best[0], best[1])
     
     def compute_startup_command(self):
-        """
-        Generate exploratory movement when no frontiers exist yet.
-        """
         cmd = self.create_twist_stamped()
         
         if self.startup_start_time is None:
@@ -223,9 +196,7 @@ class ExplorerController(Node):
             return self.create_twist_stamped()
     
     def compute_random_exploration_command(self):
-        """
-        When stuck with no frontiers, try random exploration.
-        """
+        # NO FRONTIERS = EXPLORATION
         cmd = self.create_twist_stamped()
         
         import random
@@ -242,9 +213,6 @@ class ExplorerController(Node):
         return msg
     
     def compute_waypoint_navigation_command(self):
-        """
-        Navigate along the planned path - IMPROVED VERSION with slower speeds
-        """
         if not self.current_path or self.current_waypoint_index >= len(self.current_path):
             return None
         
@@ -273,7 +241,6 @@ class ExplorerController(Node):
         
         cmd = self.create_twist_stamped()
         
-        # IMPROVED: More conservative turning and speed control
         if abs(angle_error) > 0.3:  # Increased threshold for turning
             # Turn in place
             cmd.twist.linear.x = 0.0  # Stop while turning
@@ -308,7 +275,7 @@ class ExplorerController(Node):
             self.get_logger().info('STARTUP MODE', throttle_duration_sec=1.0)
             return
         
-        # DELIBERATIVE LAYER - Path following
+        # DELIBERATIVE LAYER
         
         # Check if we have a valid path to follow
         if self.current_path and self.current_waypoint_index < len(self.current_path):
