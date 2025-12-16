@@ -70,6 +70,7 @@ class ReactiveController(Node):
 
     def compute_avoidance_command(self):
         ## obstacle avoidance ##
+        # simply turn toward open space
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.header.frame_id = 'base_link'

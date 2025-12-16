@@ -293,7 +293,7 @@ class ExplorerController(Node):
             
             if cmd is None:
                 # Path complete
-                self.get_logger().info('✓ Path complete! Goal reached.')
+                self.get_logger().info('Path complete! Goal reached.')
                 self.current_path = []
                 self.current_waypoint_index = 0
                 self.goal = None
@@ -326,9 +326,9 @@ class ExplorerController(Node):
                     self.current_waypoint_index = 0
                     self.goal_start_time = self.get_clock().now()
                     self.no_frontier_counter = 0
-                    self.get_logger().info(f'✓ Path planned with {len(path)} waypoints')
+                    self.get_logger().info(f'YES, Path planned with {len(path)} waypoints')
                 else:
-                    self.get_logger().warn('✗ Path planning failed! Trying different goal.')
+                    self.get_logger().warn('NO, Path planning failed! Trying different goal.')
                     self.goal = None
             else:
                 # No frontiers
